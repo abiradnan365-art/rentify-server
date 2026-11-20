@@ -104,6 +104,12 @@ app.get("/users", async (req, res) => {
     res.json(result);
 })
 
+app.get("/equipments", async (req, res) => {
+    const cursor = equipments.find({});
+    const result = await cursor.toArray();
+    res.json(result);
+})
+
 app.post("/equipments", async (req, res) => {
     const equipment = req.body;
     const result = await equipments.insertOne(equipment);
