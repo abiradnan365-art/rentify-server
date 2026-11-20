@@ -11,9 +11,13 @@ const port = process.env.PORT || 5000;
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 5 * 1024 * 1024,
+        fileSize: 10 * 1024 * 1024,
     },
 });
+
+//middleware
+app.use(cors());
+app.use(express.json());
 
 app.post("/upload-image", upload.single("image"), async (req, res) => {
     try {
@@ -71,11 +75,6 @@ app.post("/upload-image", upload.single("image"), async (req, res) => {
 });
 
 
-//middleware
-app.use(express.json());
-app.use(cors());
-
-
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-zunyojn-shard-00-00.azn0teo.mongodb.net:27017,ac-zunyojn-shard-00-01.azn0teo.mongodb.net:27017,ac-zunyojn-shard-00-02.azn0teo.mongodb.net:27017/?ssl=true&replicaSet=atlas-ic6asq-shard-0&authSource=admin`);
 
@@ -93,7 +92,7 @@ export async function connectToMongoDB() {
 const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("rentifydb");
 const users = database.collection("user");
-const products = database.collection("products");
+const equipments = database.collection("equipments");
 
 app.get("/", (req, res) => {
     res.send("rentify is flying");
@@ -104,6 +103,12 @@ app.get("/users", async (req, res) => {
     const result = await cursor.toArray();
     res.json(result);
 })
+
+app.post("/equipments", async (req, res) => {
+    const equipment = req.body;
+    const result = await equipments.insertOne(equipment);
+    res.json(result);
+});
 
 app.listen(port, () => {
     console.log(`rentify is running on port ${port}`);
