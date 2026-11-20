@@ -2,10 +2,74 @@ import express from "express";
 import cors from "cors";
 import { MongoClient } from 'mongodb';
 import 'dotenv/config'
-
+import multer from "multer";
 
 const app = express();
 const port = process.env.PORT || 5000;
+
+
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 5 * 1024 * 1024,
+    },
+});
+
+app.post("/upload-image", upload.single("image"), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: "Please select an image",
+            });
+        }
+
+        if (!req.file.mimetype.startsWith("image/")) {
+            return res.status(400).json({
+                success: false,
+                message: "Only image files are allowed",
+            });
+        }
+
+        const formData = new FormData();
+
+        formData.append(
+            "image",
+            req.file.buffer.toString("base64")
+        );
+
+        const response = await fetch(
+            `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`,
+            {
+                method: "POST",
+                body: formData,
+            }
+        );
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            return res.status(400).json({
+                success: false,
+                message: "ImgBB upload failed",
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            imageUrl: result.data.url,
+        });
+
+    } catch (error) {
+        console.error("Image upload error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Image upload failed",
+        });
+    }
+});
+
 
 //middleware
 app.use(express.json());
@@ -29,9 +93,16 @@ export async function connectToMongoDB() {
 const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("rentifydb");
 const users = database.collection("user");
+const products = database.collection("products");
 
 app.get("/", (req, res) => {
     res.send("rentify is flying");
+})
+
+app.get("/users", async (req, res) => {
+    const cursor = users.find({});
+    const result = await cursor.toArray();
+    res.json(result);
 })
 
 app.listen(port, () => {
