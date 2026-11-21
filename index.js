@@ -105,10 +105,50 @@ app.get("/users", async (req, res) => {
 })
 
 app.get("/equipments", async (req, res) => {
-    const cursor = equipments.find({});
-    const result = await cursor.toArray();
-    res.json(result);
-})
+    try {
+        const query = {};
+
+        if (req.query.category) {
+            // special character escape kora (jemon & ba ( ) ) jate regex na bhange
+            const escaped = req.query.category.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            query.category = { $regex: escaped, $options: "i" };
+        }
+        if (req.query.location) {
+            const escaped = req.query.location.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            query.location = { $regex: escaped, $options: "i" };
+        }
+        if (req.query.condition) {
+            const escaped = req.query.condition.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            query.condition = { $regex: escaped, $options: "i" };
+        }
+        const min = parseFloat(req.query.minPrice);
+        const max = parseFloat(req.query.maxPrice);
+
+        if (!isNaN(min) || !isNaN(max)) {
+            query.rentalPrice = {};
+            if (!isNaN(min)) query.rentalPrice.$gte = min;
+            if (!isNaN(max)) query.rentalPrice.$lte = max;
+        }
+        if (req.query.search) {
+            const escaped = req.query.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+            query.$or = [
+                { name: { $regex: escaped, $options: "i" } },
+                { location: { $regex: escaped, $options: "i" } },
+                { category: { $regex: escaped, $options: "i" } },
+                { rentalType: { $regex: escaped, $options: "i" } },
+                { description: { $regex: escaped, $options: "i" } },
+                { rentalTerms: { $regex: escaped, $options: "i" } }
+            ];
+        }
+
+        const result = await equipments.find(query).toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch equipments error:", error);
+        res.status(500).json({ message: "Failed to fetch equipments" });
+    }
+});
 
 app.post("/equipments", async (req, res) => {
     const equipment = req.body;
