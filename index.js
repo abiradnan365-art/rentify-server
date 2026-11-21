@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 import 'dotenv/config'
 import multer from "multer";
 
@@ -113,6 +113,13 @@ app.get("/equipments", async (req, res) => {
 app.post("/equipments", async (req, res) => {
     const equipment = req.body;
     const result = await equipments.insertOne(equipment);
+    res.json(result);
+});
+
+app.delete("/equipments/:id", async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await equipments.deleteOne(query);
     res.json(result);
 });
 
