@@ -104,51 +104,76 @@ app.get("/users", async (req, res) => {
     res.json(result);
 })
 
+
 app.get("/equipments", async (req, res) => {
     try {
         const query = {};
 
-        if (req.query.category) {
-            // special character escape kora (jemon & ba ( ) ) jate regex na bhange
-            const escaped = req.query.category.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            query.category = { $regex: escaped, $options: "i" };
-        }
-        if (req.query.location) {
-            const escaped = req.query.location.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            query.location = { $regex: escaped, $options: "i" };
-        }
-        if (req.query.condition) {
-            const escaped = req.query.condition.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            query.condition = { $regex: escaped, $options: "i" };
-        }
-        const min = parseFloat(req.query.minPrice);
-        const max = parseFloat(req.query.maxPrice);
-
-        if (!isNaN(min) || !isNaN(max)) {
-            query.rentalPrice = {};
-            if (!isNaN(min)) query.rentalPrice.$gte = min;
-            if (!isNaN(max)) query.rentalPrice.$lte = max;
-        }
+      
         if (req.query.search) {
-            const escaped = req.query.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const escaped = req.query.search.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&"
+            );
 
             query.$or = [
                 { name: { $regex: escaped, $options: "i" } },
                 { location: { $regex: escaped, $options: "i" } },
-                { category: { $regex: escaped, $options: "i" } },
-                { rentalType: { $regex: escaped, $options: "i" } },
-                { description: { $regex: escaped, $options: "i" } },
-                { rentalTerms: { $regex: escaped, $options: "i" } }
             ];
         }
 
-        const result = await equipments.find(query).toArray();
+      
+        if (req.query.category) {
+            query.category = req.query.category;
+        }
+
+     
+        if (req.query.rentalType) {
+            query.rentalType = req.query.rentalType;
+        }
+
+        if (req.query.maxPrice) {
+            query.rentalPrice = {
+                $lte: Number(req.query.maxPrice)
+            };
+        }
+
+        if (req.query.inStock === "true") {
+            query.status = "Approved";
+        }
+
+       
+        let sortOption = { createdAt: -1 };
+
+        if (req.query.sort === "price-asc") {
+            sortOption = { rentalPrice: 1 };
+        } else if (req.query.sort === "price-desc") {
+            sortOption = { rentalPrice: -1 };
+        }
+
+        const result = await equipments
+            .find(query)
+            .sort(sortOption)
+            .toArray();
+
         res.json(result);
+
     } catch (error) {
         console.error("Fetch equipments error:", error);
-        res.status(500).json({ message: "Failed to fetch equipments" });
+
+        res.status(500).json({
+            message: "Failed to fetch equipments"
+        });
     }
 });
+
+app.get("/equipments/:id", async (req, res) => {
+    const id = req.params.id;
+    const query = { _id: new ObjectId(id) };
+    const result = await equipments.findOne(query);
+    res.json(result);
+});
+
 
 app.post("/equipments", async (req, res) => {
     const equipment = req.body;
