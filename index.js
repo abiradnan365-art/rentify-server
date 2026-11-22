@@ -390,6 +390,121 @@ app.get("/admin/stats", requireInternalKey, async (req, res) => {
     }
 });
 
+
+app.get("/owner/stats", requireInternalKey, async (req, res) => {
+    try {
+        const { ownerId } = req.query;
+        if (!ownerId) {
+            return res.status(400).json({ message: "ownerId is required" });
+        }
+
+        const today = new Date().toISOString().split("T")[0];
+
+        const [
+            myEquipment,
+            pendingApprovals,
+            totalRentals,
+            activeRentals,
+            completedRentals,
+            earnings,
+        ] = await Promise.all([
+            equipments.countDocuments({ ownerId }),
+            equipments.countDocuments({ ownerId, status: "Pending" }),
+            bookings.countDocuments({ ownerId }),
+            bookings.countDocuments({
+                ownerId,
+                status: "Confirmed",
+                endDate: { $gte: today },
+            }),
+            bookings.countDocuments({
+                ownerId,
+                $or: [
+                    { status: "Completed" },
+                    { status: "Confirmed", endDate: { $lt: today } },
+                ],
+            }),
+            bookings
+                .aggregate([
+                    { $match: { ownerId, paymentStatus: "Paid" } },
+                    { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+                ])
+                .toArray(),
+        ]);
+
+        res.json({
+            myEquipment,
+            pendingApprovals,
+            totalRentals,
+            activeRentals,
+            completedRentals,
+            totalEarnings: earnings[0]?.total ?? 0,
+        });
+    } catch (error) {
+        console.error("Fetch owner stats error:", error);
+        res.status(500).json({ message: "Failed to fetch owner stats" });
+    }
+});
+
+
+app.get("/customer/stats", requireInternalKey, async (req, res) => {
+    try {
+        const { userId } = req.query;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const today = new Date().toISOString().split("T")[0];
+
+        const [
+            totalBookings,
+            activeRentals,
+            upcomingRentals,
+            completedRentals,
+            spent,
+            favoriteCount,
+        ] = await Promise.all([
+            bookings.countDocuments({ userId }),
+            bookings.countDocuments({
+                userId,
+                status: "Confirmed",
+                startDate: { $lte: today },
+                endDate: { $gte: today },
+            }),
+            bookings.countDocuments({
+                userId,
+                status: "Confirmed",
+                startDate: { $gt: today },
+            }),
+            bookings.countDocuments({
+                userId,
+                $or: [
+                    { status: "Completed" },
+                    { status: "Confirmed", endDate: { $lt: today } },
+                ],
+            }),
+            bookings
+                .aggregate([
+                    { $match: { userId, paymentStatus: "Paid" } },
+                    { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+                ])
+                .toArray(),
+            favorites.countDocuments({ userId }),
+        ]);
+
+        res.json({
+            totalBookings,
+            activeRentals,
+            upcomingRentals,
+            completedRentals,
+            totalSpent: spent[0]?.total ?? 0,
+            favorites: favoriteCount,
+        });
+    } catch (error) {
+        console.error("Fetch customer stats error:", error);
+        res.status(500).json({ message: "Failed to fetch customer stats" });
+    }
+});
+
 app.patch("/admin/users/:id/role", requireInternalKey, async (req, res) => {
     try {
         const { role } = req.body;
