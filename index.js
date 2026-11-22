@@ -663,3 +663,5 @@ app.patch("/equipments/:id/status", verifyJwt, requireRole("admin"), async (req,
 app.listen(port, () => {
     console.log(`rentify is running on port ${port}`);
 })
+
+export default app;
