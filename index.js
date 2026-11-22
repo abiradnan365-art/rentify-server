@@ -344,6 +344,52 @@ app.get("/admin/users", requireInternalKey, async (req, res) => {
     }
 });
 
+
+app.get("/admin/stats", requireInternalKey, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split("T")[0];
+
+        const [
+            totalUsers,
+            totalEquipment,
+            totalBookings,
+            pendingApprovals,
+            completedRentals,
+            revenue,
+        ] = await Promise.all([
+            users.countDocuments(),
+            equipments.countDocuments(),
+            bookings.countDocuments(),
+            equipments.countDocuments({ status: "Pending" }),
+            // Completed status, ba Confirmed kintu end date periye geche
+            bookings.countDocuments({
+                $or: [
+                    { status: "Completed" },
+                    { status: "Confirmed", endDate: { $lt: today } },
+                ],
+            }),
+            bookings
+                .aggregate([
+                    { $match: { paymentStatus: "Paid" } },
+                    { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+                ])
+                .toArray(),
+        ]);
+
+        res.json({
+            totalUsers,
+            totalEquipment,
+            totalBookings,
+            pendingApprovals,
+            completedRentals,
+            totalRevenue: revenue[0]?.total ?? 0,
+        });
+    } catch (error) {
+        console.error("Fetch stats error:", error);
+        res.status(500).json({ message: "Failed to fetch stats" });
+    }
+});
+
 app.patch("/admin/users/:id/role", requireInternalKey, async (req, res) => {
     try {
         const { role } = req.body;
