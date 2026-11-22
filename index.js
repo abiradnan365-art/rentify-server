@@ -143,6 +143,23 @@ const requireRole = (...roles) => (req, res, next) => {
     next();
 };
 
+const getBookedQuantity = async (equipmentId, startDate, endDate) => {
+    const result = await bookings
+        .aggregate([
+            {
+                $match: {
+                    equipmentId,
+                    status: { $ne: "Cancelled" },
+                    startDate: { $lte: endDate },
+                    endDate: { $gte: startDate },
+                },
+            },
+            { $group: { _id: null, total: { $sum: "$quantity" } } },
+        ])
+        .toArray();
+    return result[0]?.total ?? 0;
+};
+
 app.get("/equipments", async (req, res) => {
     try {
         const query = {};
@@ -207,10 +224,36 @@ app.get("/equipments", async (req, res) => {
 });
 
 app.get("/equipments/:id", async (req, res) => {
-    const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const result = await equipments.findOne(query);
-    res.json(result);
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ message: "Equipment not found" });
+        }
+        const result = await equipments.findOne({ _id: new ObjectId(req.params.id) });
+        if (!result) return res.status(404).json({ message: "Equipment not found" });
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch equipment error:", error);
+        res.status(500).json({ message: "Failed to fetch equipment" });
+    }
+});
+
+app.get("/equipments/:id/availability", async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        const dateOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
+        if (!ObjectId.isValid(req.params.id) || !dateOk(startDate) || !dateOk(endDate)) {
+            return res.status(400).json({ message: "Invalid request" });
+        }
+
+        const equipment = await equipments.findOne({ _id: new ObjectId(req.params.id) });
+        if (!equipment) return res.status(404).json({ message: "Equipment not found" });
+
+        const booked = await getBookedQuantity(req.params.id, startDate, endDate);
+        res.json({ available: Math.max(Number(equipment.quantity) - booked, 0) });
+    } catch (error) {
+        console.error("Availability error:", error);
+        res.status(500).json({ message: "Failed to check availability" });
+    }
 });
 
 
@@ -357,6 +400,27 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
             return res.status(400).json({ message: "Invalid quantity" });
         }
 
+        const today = new Date().toISOString().split("T")[0];
+
+        const mine = await bookings.findOne({
+            userId: booking.userId,
+            equipmentId: booking.equipmentId,
+            status: { $ne: "Cancelled" },
+            endDate: { $gte: today },
+        });
+        if (mine) {
+            return res.status(409).json({ message: "Already booked by this customer" });
+        }
+
+        const booked = await getBookedQuantity(
+            booking.equipmentId,
+            booking.startDate,
+            booking.endDate
+        );
+        if (booked + quantity > Number(equipment.quantity)) {
+            return res.status(409).json({ message: "Not available for the selected dates" });
+        }
+
         const type = (equipment.rentalType || "Daily").toLowerCase();
         const units = type === "weekly" ? Math.ceil(days / 7)
             : type === "monthly" ? Math.ceil(days / 30)
@@ -365,7 +429,7 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
         booking.quantity = quantity;
         booking.totalDays = days;
         booking.totalAmount = units * Number(equipment.rentalPrice) * quantity;
-        booking.ownerId = equipment.ownerId ?? null; 
+        booking.ownerId = equipment.ownerId ?? null;
 
         const result = await bookings.insertOne(booking);
         res.json(result);
