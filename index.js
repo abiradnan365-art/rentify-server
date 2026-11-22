@@ -97,6 +97,7 @@ const bookings = database.collection("bookings");
 
 await bookings.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true });
 
+
 const requireInternalKey = (req, res, next) => {
     if (req.headers["x-internal-key"] !== process.env.INTERNAL_API_KEY) {
         return res.status(401).json({ message: "Unauthorized" });
@@ -119,7 +120,7 @@ app.get("/equipments", async (req, res) => {
     try {
         const query = {};
 
-      
+
         if (req.query.search) {
             const escaped = req.query.search.replace(
                 /[.*+?^${}()|[\]\\]/g,
@@ -132,12 +133,15 @@ app.get("/equipments", async (req, res) => {
             ];
         }
 
-      
+
         if (req.query.category) {
             query.category = req.query.category;
         }
 
-     
+        if (req.query.ownerId) {
+            query.ownerId = req.query.ownerId;
+        }
+
         if (req.query.rentalType) {
             query.rentalType = req.query.rentalType;
         }
@@ -152,7 +156,7 @@ app.get("/equipments", async (req, res) => {
             query.status = "Approved";
         }
 
-       
+
         let sortOption = { createdAt: -1 };
 
         if (req.query.sort === "price-asc") {
@@ -185,11 +189,36 @@ app.get("/equipments/:id", async (req, res) => {
 });
 
 
+
 app.post("/equipments", async (req, res) => {
-    const equipment = req.body;
-    const result = await equipments.insertOne(equipment);
-    res.json(result);
+    try {
+        const equipment = req.body;
+
+        const result = await equipments.insertOne(equipment);
+
+        if (!result.acknowledged) {
+            return res.status(500).json({
+                success: false,
+                message: "Equipment creation failed",
+            });
+        }
+
+        res.status(201).json({
+            success: true,
+            message: "Equipment created successfully",
+            insertedId: result.insertedId,
+        });
+
+    } catch (error) {
+        console.error("Create equipment error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Failed to create equipment",
+        });
+    }
 });
+
 
 app.delete("/equipments/:id", async (req, res) => {
     const id = req.params.id;
@@ -202,8 +231,12 @@ app.get('/bookings', async (req, res) => {
 
     const query = {};
 
-    if (req.query.customerId){
+    if (req.query.customerId) {
         query.userId = req.query.customerId;
+    }
+
+    if (req.query.ownerId) {
+        query.ownerId = req.query.ownerId;
     }
 
     const cursor = bookings.find(query);
@@ -215,7 +248,7 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
     try {
         const booking = req.body;
 
-       
+
         if (booking.stripeSessionId) {
             const existing = await bookings.findOne({ stripeSessionId: booking.stripeSessionId });
             if (existing) {
@@ -238,8 +271,8 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
 
         const type = (equipment.rentalType || "Daily").toLowerCase();
         const units = type === "weekly" ? Math.ceil(days / 7)
-                    : type === "monthly" ? Math.ceil(days / 30)
-                    : days;
+            : type === "monthly" ? Math.ceil(days / 30)
+                : days;
 
         booking.quantity = quantity;
         booking.totalDays = days;
