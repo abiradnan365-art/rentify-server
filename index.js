@@ -3,6 +3,7 @@ import cors from "cors";
 import { MongoClient, ObjectId } from 'mongodb';
 import 'dotenv/config'
 import multer from "multer";
+import { jwtVerify, createRemoteJWKSet } from "jose";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -78,7 +79,6 @@ app.post("/upload-image", upload.single("image"), async (req, res) => {
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-zunyojn-shard-00-00.azn0teo.mongodb.net:27017,ac-zunyojn-shard-00-01.azn0teo.mongodb.net:27017,ac-zunyojn-shard-00-02.azn0teo.mongodb.net:27017/?ssl=true&replicaSet=atlas-ic6asq-shard-0&authSource=admin`);
 
-
 export async function connectToMongoDB() {
     try {
         await client.connect();
@@ -110,12 +110,38 @@ app.get("/", (req, res) => {
     res.send("rentify is flying");
 })
 
-app.get("/users", async (req, res) => {
-    const cursor = users.find({});
-    const result = await cursor.toArray();
-    res.json(result);
-})
+const JWKS = createRemoteJWKSet(new URL(`${process.env.AUTH_URL}/api/auth/jwks`));
 
+const verifyJwt = async (req, res, next) => {
+    try {
+        const header = req.headers.authorization || "";
+        const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+        if (!token) return res.status(401).json({ message: "Token missing" });
+
+        const { payload } = await jwtVerify(token, JWKS, {
+            issuer: process.env.AUTH_URL,
+            audience: process.env.AUTH_URL,
+        });
+
+        req.user = {
+            id: payload.id ?? payload.sub,
+            email: payload.email,
+            name: payload.name,
+            role: payload.role,
+        };
+        next();
+    } catch (error) {
+        console.error("JWT verify failed:", error.message);
+        return res.status(401).json({ message: "Invalid or expired token" });
+    }
+};
+
+const requireRole = (...roles) => (req, res, next) => {
+    if (!roles.includes(req.user?.role)) {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+    next();
+};
 
 app.get("/equipments", async (req, res) => {
     try {
@@ -139,18 +165,7 @@ app.get("/equipments", async (req, res) => {
             query.category = req.query.category;
         }
 
-        if (req.query.ownerId) {
-           
-            query.ownerId = req.query.ownerId;
-        } else if (
-            req.query.all === "true" &&
-            req.headers["x-internal-key"] === process.env.INTERNAL_API_KEY
-        ) {
-          
-        } else {
-            
-            query.status = "Approved";
-        }
+        query.status = "Approved";
 
         if (req.query.rentalType) {
             query.rentalType = req.query.rentalType;
@@ -200,52 +215,70 @@ app.get("/equipments/:id", async (req, res) => {
 
 
 
-app.post("/equipments", async (req, res) => {
+app.post("/equipments", verifyJwt, requireRole("owner"), async (req, res) => {
     try {
-        const equipment = req.body;
+        const b = req.body;
+
+        const equipment = {
+            name: b.name,
+            category: b.category,
+            brand: b.brand,
+            model: b.model,
+            rentalPrice: Number(b.rentalPrice),
+            rentalType: b.rentalType,
+            location: b.location,
+            quantity: Number(b.quantity),
+            condition: b.condition,
+            description: b.description,
+            rentalTerms: b.rentalTerms,
+            images: Array.isArray(b.images) ? b.images : [],
+            ownerId: req.user.id,
+            owner: { id: req.user.id, name: req.user.name, email: req.user.email },
+            status: "Pending",
+            createdAt: new Date().toISOString(),
+        };
+
+        if (!equipment.name || !(equipment.rentalPrice > 0) || !(equipment.quantity >= 1)) {
+            return res.status(400).json({ success: false, message: "Invalid equipment data" });
+        }
 
         const result = await equipments.insertOne(equipment);
-
-        if (!result.acknowledged) {
-            return res.status(500).json({
-                success: false,
-                message: "Equipment creation failed",
-            });
-        }
 
         res.status(201).json({
             success: true,
             message: "Equipment created successfully",
             insertedId: result.insertedId,
         });
-
     } catch (error) {
         console.error("Create equipment error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to create equipment",
-        });
+        res.status(500).json({ success: false, message: "Failed to create equipment" });
     }
 });
 
 
-app.delete("/equipments/:id", async (req, res) => {
-    const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const result = await equipments.deleteOne(query);
-    res.json(result);
+app.delete("/equipments/:id", verifyJwt, requireRole("owner", "admin"), async (req, res) => {
+    try {
+        const filter = { _id: new ObjectId(req.params.id) };
+        if (req.user.role === "owner") filter.ownerId = req.user.id;
+
+        const result = await equipments.deleteOne(filter);
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ message: "Equipment not found" });
+        }
+        res.json(result);
+    } catch (error) {
+        console.error("Delete equipment error:", error);
+        res.status(500).json({ message: "Failed to delete equipment" });
+    }
 });
 
-
-app.patch("/equipments/:id", requireInternalKey, async (req, res) => {
+app.patch("/equipments/:id", verifyJwt, requireRole("owner"), async (req, res) => {
     try {
-        const { ownerId, updates } = req.body;
-        if (!ownerId || !updates) {
+        const { updates } = req.body;
+        if (!updates) {
             return res.status(400).json({ message: "Invalid request" });
         }
 
-        // shudhu ei field gulo bodlano jabe (status, ownerId, owner bodlano jabe na)
         const allowed = [
             "name", "category", "brand", "model", "rentalPrice", "rentalType",
             "location", "quantity", "condition", "description", "rentalTerms",
@@ -264,9 +297,9 @@ app.patch("/equipments/:id", requireInternalKey, async (req, res) => {
             return res.status(400).json({ message: "Invalid price or quantity" });
         }
 
-        // _id ar ownerId duita-i mile tobei update, mane onner equipment e haat dewa jabe na
+        // ownerId token theke, tai onno owner er equipment e haat dewa jabe na
         const result = await equipments.updateOne(
-            { _id: new ObjectId(req.params.id), ownerId },
+            { _id: new ObjectId(req.params.id), ownerId: req.user.id },
             { $set }
         );
 
@@ -280,21 +313,23 @@ app.patch("/equipments/:id", requireInternalKey, async (req, res) => {
     }
 });
 
-app.get('/bookings', async (req, res) => {
+app.get("/bookings", verifyJwt, async (req, res) => {
+    try {
+        const query = {};
 
-    const query = {};
+        // token theke nijer data-i shudhu, query theke na
+        if (req.user.role === "customer") query.userId = req.user.id;
+        else if (req.user.role === "owner") query.ownerId = req.user.id;
+        else if (req.user.role !== "admin") {
+            return res.status(403).json({ message: "Forbidden" });
+        }
 
-    if (req.query.customerId) {
-        query.userId = req.query.customerId;
+        const result = await bookings.find(query).sort({ bookedAt: -1 }).toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch bookings error:", error);
+        res.status(500).json({ message: "Failed to fetch bookings" });
     }
-
-    if (req.query.ownerId) {
-        query.ownerId = req.query.ownerId;
-    }
-
-    const cursor = bookings.find(query);
-    const result = await cursor.toArray();
-    res.json(result);
 });
 
 app.post('/bookings', requireInternalKey, async (req, res) => {
@@ -330,6 +365,7 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
         booking.quantity = quantity;
         booking.totalDays = days;
         booking.totalAmount = units * Number(equipment.rentalPrice) * quantity;
+        booking.ownerId = equipment.ownerId ?? null; 
 
         const result = await bookings.insertOne(booking);
         res.json(result);
@@ -374,7 +410,7 @@ app.post("/favorites/toggle", requireInternalKey, async (req, res) => {
 });
 
 // admin
-app.get("/admin/users", requireInternalKey, async (req, res) => {
+app.get("/admin/users", verifyJwt, requireRole("admin"), async (req, res) => {
     try {
         const result = await users
             .find({}, { projection: { name: 1, email: 1, role: 1, image: 1, createdAt: 1 } })
@@ -388,7 +424,7 @@ app.get("/admin/users", requireInternalKey, async (req, res) => {
 });
 
 
-app.get("/admin/stats", requireInternalKey, async (req, res) => {
+app.get("/admin/stats", verifyJwt, requireRole("admin"), async (req, res) => {
     try {
         const today = new Date().toISOString().split("T")[0];
 
@@ -488,6 +524,24 @@ app.get("/owner/stats", requireInternalKey, async (req, res) => {
     }
 });
 
+app.get("/owner/equipments", requireInternalKey, async (req, res) => {
+    try {
+        const { ownerId } = req.query;
+        if (!ownerId) {
+            return res.status(400).json({ message: "ownerId is required" });
+        }
+
+        const result = await equipments
+            .find({ ownerId: String(ownerId) })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch owner equipments error:", error);
+        res.status(500).json({ message: "Failed to fetch owner equipments" });
+    }
+});
 
 app.get("/customer/stats", requireInternalKey, async (req, res) => {
     try {
@@ -548,7 +602,7 @@ app.get("/customer/stats", requireInternalKey, async (req, res) => {
     }
 });
 
-app.patch("/admin/users/:id/role", requireInternalKey, async (req, res) => {
+app.patch("/admin/users/:id/role", verifyJwt, requireRole("admin"), async (req, res) => {
     try {
         const { role } = req.body;
         if (!["customer", "owner", "admin"].includes(role)) {
@@ -569,7 +623,7 @@ app.patch("/admin/users/:id/role", requireInternalKey, async (req, res) => {
 });
 
 
-app.get("/admin/bookings", requireInternalKey, async (req, res) => {
+app.get("/admin/bookings", verifyJwt, requireRole("admin"), async (req, res) => {
     try {
         const result = await bookings.find({}).sort({ bookedAt: -1 }).toArray();
         res.json(result);
@@ -579,8 +633,17 @@ app.get("/admin/bookings", requireInternalKey, async (req, res) => {
     }
 });
 
+app.get("/admin/equipments", verifyJwt, requireRole("admin"), async (req, res) => {
+    try {
+        const result = await equipments.find({}).sort({ createdAt: -1 }).toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch admin equipments error:", error);
+        res.status(500).json({ message: "Failed to fetch equipments" });
+    }
+});
 
-app.patch("/equipments/:id/status", requireInternalKey, async (req, res) => {
+app.patch("/equipments/:id/status", verifyJwt, requireRole("admin"), async (req, res) => {
     try {
         const { status } = req.body;
         if (!["Approved", "Pending"].includes(status)) {
