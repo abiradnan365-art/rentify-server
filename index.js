@@ -96,7 +96,8 @@ const equipments = database.collection("equipments");
 const bookings = database.collection("bookings");
 
 await bookings.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true });
-
+const favorites = database.collection("favorites");
+await favorites.createIndex({ userId: 1, equipmentId: 1 }, { unique: true });
 
 const requireInternalKey = (req, res, next) => {
     if (req.headers["x-internal-key"] !== process.env.INTERNAL_API_KEY) {
@@ -139,7 +140,16 @@ app.get("/equipments", async (req, res) => {
         }
 
         if (req.query.ownerId) {
+           
             query.ownerId = req.query.ownerId;
+        } else if (
+            req.query.all === "true" &&
+            req.headers["x-internal-key"] === process.env.INTERNAL_API_KEY
+        ) {
+          
+        } else {
+            
+            query.status = "Approved";
         }
 
         if (req.query.rentalType) {
@@ -285,6 +295,103 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
         res.status(500).json({ message: "Failed to create booking" });
     }
 })
+
+app.get("/favorites", requireInternalKey, async (req, res) => {
+    try {
+        const favs = await favorites.find({ userId: req.query.userId }).toArray();
+        const ids = favs.map((f) => new ObjectId(f.equipmentId));
+        const result = await equipments.find({ _id: { $in: ids } }).toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch favorites error:", error);
+        res.status(500).json({ message: "Failed to fetch favorites" });
+    }
+});
+
+app.post("/favorites/toggle", requireInternalKey, async (req, res) => {
+    try {
+        const { userId, equipmentId } = req.body;
+        const existing = await favorites.findOne({ userId, equipmentId });
+
+        if (existing) {
+            await favorites.deleteOne({ _id: existing._id });
+            return res.json({ favorited: false });
+        }
+
+        await favorites.insertOne({
+            userId,
+            equipmentId,
+            createdAt: new Date().toISOString(),
+        });
+        res.json({ favorited: true });
+    } catch (error) {
+        console.error("Toggle favorite error:", error);
+        res.status(500).json({ message: "Failed to update favorite" });
+    }
+});
+
+// admin
+app.get("/admin/users", requireInternalKey, async (req, res) => {
+    try {
+        const result = await users
+            .find({}, { projection: { name: 1, email: 1, role: 1, image: 1, createdAt: 1 } })
+            .sort({ createdAt: -1 })
+            .toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch users error:", error);
+        res.status(500).json({ message: "Failed to fetch users" });
+    }
+});
+
+app.patch("/admin/users/:id/role", requireInternalKey, async (req, res) => {
+    try {
+        const { role } = req.body;
+        if (!["customer", "owner", "admin"].includes(role)) {
+            return res.status(400).json({ message: "Invalid role" });
+        }
+        const result = await users.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { role } }
+        );
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ message: "User not found" });
+        }
+        res.json(result);
+    } catch (error) {
+        console.error("Update role error:", error);
+        res.status(500).json({ message: "Failed to update role" });
+    }
+});
+
+
+app.get("/admin/bookings", requireInternalKey, async (req, res) => {
+    try {
+        const result = await bookings.find({}).sort({ bookedAt: -1 }).toArray();
+        res.json(result);
+    } catch (error) {
+        console.error("Fetch bookings error:", error);
+        res.status(500).json({ message: "Failed to fetch bookings" });
+    }
+});
+
+
+app.patch("/equipments/:id/status", requireInternalKey, async (req, res) => {
+    try {
+        const { status } = req.body;
+        if (!["Approved", "Pending"].includes(status)) {
+            return res.status(400).json({ message: "Invalid status" });
+        }
+        const result = await equipments.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { status } }
+        );
+        res.json(result);
+    } catch (error) {
+        console.error("Update status error:", error);
+        res.status(500).json({ message: "Failed to update status" });
+    }
+});
 
 app.listen(port, () => {
     console.log(`rentify is running on port ${port}`);
