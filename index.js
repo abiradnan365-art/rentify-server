@@ -93,6 +93,16 @@ const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("rentifydb");
 const users = database.collection("user");
 const equipments = database.collection("equipments");
+const bookings = database.collection("bookings");
+
+await bookings.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true });
+
+const requireInternalKey = (req, res, next) => {
+    if (req.headers["x-internal-key"] !== process.env.INTERNAL_API_KEY) {
+        return res.status(401).json({ message: "Unauthorized" });
+    }
+    next();
+};
 
 app.get("/", (req, res) => {
     res.send("rentify is flying");
@@ -187,6 +197,61 @@ app.delete("/equipments/:id", async (req, res) => {
     const result = await equipments.deleteOne(query);
     res.json(result);
 });
+
+app.get('/bookings', async (req, res) => {
+
+    const query = {};
+
+    if (req.query.customerId){
+        query.userId = req.query.customerId;
+    }
+
+    const cursor = bookings.find(query);
+    const result = await cursor.toArray();
+    res.json(result);
+});
+
+app.post('/bookings', requireInternalKey, async (req, res) => {
+    try {
+        const booking = req.body;
+
+       
+        if (booking.stripeSessionId) {
+            const existing = await bookings.findOne({ stripeSessionId: booking.stripeSessionId });
+            if (existing) {
+                return res.json({ acknowledged: true, insertedId: existing._id, duplicate: true });
+            }
+        }
+
+        const equipment = await equipments.findOne({ _id: new ObjectId(booking.equipmentId) });
+        if (!equipment) return res.status(404).json({ message: "Equipment not found" });
+
+        const days = Math.round((new Date(booking.endDate) - new Date(booking.startDate)) / 86400000) + 1;
+        if (isNaN(days) || days < 1) {
+            return res.status(400).json({ message: "Invalid rental period" });
+        }
+
+        const quantity = Number(booking.quantity) || 1;
+        if (quantity < 1 || quantity > Number(equipment.quantity)) {
+            return res.status(400).json({ message: "Invalid quantity" });
+        }
+
+        const type = (equipment.rentalType || "Daily").toLowerCase();
+        const units = type === "weekly" ? Math.ceil(days / 7)
+                    : type === "monthly" ? Math.ceil(days / 30)
+                    : days;
+
+        booking.quantity = quantity;
+        booking.totalDays = days;
+        booking.totalAmount = units * Number(equipment.rentalPrice) * quantity;
+
+        const result = await bookings.insertOne(booking);
+        res.json(result);
+    } catch (error) {
+        console.error("Create booking error:", error);
+        res.status(500).json({ message: "Failed to create booking" });
+    }
+})
 
 app.listen(port, () => {
     console.log(`rentify is running on port ${port}`);
