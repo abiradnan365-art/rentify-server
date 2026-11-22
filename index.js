@@ -237,6 +237,49 @@ app.delete("/equipments/:id", async (req, res) => {
     res.json(result);
 });
 
+
+app.patch("/equipments/:id", requireInternalKey, async (req, res) => {
+    try {
+        const { ownerId, updates } = req.body;
+        if (!ownerId || !updates) {
+            return res.status(400).json({ message: "Invalid request" });
+        }
+
+        // shudhu ei field gulo bodlano jabe (status, ownerId, owner bodlano jabe na)
+        const allowed = [
+            "name", "category", "brand", "model", "rentalPrice", "rentalType",
+            "location", "quantity", "condition", "description", "rentalTerms",
+        ];
+        const $set = {};
+        for (const key of allowed) {
+            if (updates[key] !== undefined) $set[key] = updates[key];
+        }
+
+        if ($set.rentalPrice !== undefined) $set.rentalPrice = Number($set.rentalPrice);
+        if ($set.quantity !== undefined) $set.quantity = Number($set.quantity);
+        if (
+            ($set.rentalPrice !== undefined && !($set.rentalPrice > 0)) ||
+            ($set.quantity !== undefined && !($set.quantity >= 1))
+        ) {
+            return res.status(400).json({ message: "Invalid price or quantity" });
+        }
+
+        // _id ar ownerId duita-i mile tobei update, mane onner equipment e haat dewa jabe na
+        const result = await equipments.updateOne(
+            { _id: new ObjectId(req.params.id), ownerId },
+            { $set }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ message: "Equipment not found" });
+        }
+        res.json(result);
+    } catch (error) {
+        console.error("Update equipment error:", error);
+        res.status(500).json({ message: "Failed to update equipment" });
+    }
+});
+
 app.get('/bookings', async (req, res) => {
 
     const query = {};
