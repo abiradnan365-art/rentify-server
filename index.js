@@ -478,11 +478,21 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
     }
 })
 
-app.get("/favorites", requireInternalKey, async (req, res) => {
+// Get Favorites
+app.get("/favorites", verifyToken, verifyRenter, async (req, res) => {
     try {
-        const favs = await favorites.find({ userId: req.query.userId }).toArray();
-        const ids = favs.map((f) => new ObjectId(f.equipmentId));
-        const result = await equipments.find({ _id: { $in: ids } }).toArray();
+        const userId = req.user.id;
+
+        const favs = await favorites.find({ userId }).toArray();
+
+        const ids = favs
+            .filter((f) => ObjectId.isValid(f.equipmentId))
+            .map((f) => new ObjectId(f.equipmentId));
+
+        const result = await equipments.find({
+            _id: { $in: ids }
+        }).toArray();
+
         res.json(result);
     } catch (error) {
         console.error("Fetch favorites error:", error);
@@ -490,9 +500,17 @@ app.get("/favorites", requireInternalKey, async (req, res) => {
     }
 });
 
-app.post("/favorites/toggle", requireInternalKey, async (req, res) => {
+
+// Toggle Favorite
+app.post("/favorites/toggle", verifyToken, verifyRenter, async (req, res) => {
     try {
-        const { userId, equipmentId } = req.body;
+        const userId = req.user.id;
+        const { equipmentId } = req.body;
+
+        if (!equipmentId || !ObjectId.isValid(equipmentId)) {
+            return res.status(400).json({ message: "Invalid equipment ID" });
+        }
+
         const existing = await favorites.findOne({ userId, equipmentId });
 
         if (existing) {
@@ -505,6 +523,7 @@ app.post("/favorites/toggle", requireInternalKey, async (req, res) => {
             equipmentId,
             createdAt: new Date().toISOString(),
         });
+
         res.json({ favorited: true });
     } catch (error) {
         console.error("Toggle favorite error:", error);
@@ -601,13 +620,9 @@ app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
 });
 
 
-app.get("/owner/stats", requireInternalKey, async (req, res) => {
+app.get("/owner/stats", verifyToken, verifyOwner, async (req, res) => {
     try {
-        const { ownerId } = req.query;
-        if (!ownerId) {
-            return res.status(400).json({ message: "ownerId is required" });
-        }
-
+        const ownerId = req.user.id;
         const today = new Date().toISOString().split("T")[0];
 
         const [
@@ -655,12 +670,9 @@ app.get("/owner/stats", requireInternalKey, async (req, res) => {
     }
 });
 
-app.get("/owner/equipments", requireInternalKey, async (req, res) => {
+app.get("/owner/equipments", verifyToken, verifyOwner, async (req, res) => {
     try {
-        const { ownerId } = req.query;
-        if (!ownerId) {
-            return res.status(400).json({ message: "ownerId is required" });
-        }
+        const ownerId = req.user.id;
 
         const result = await equipments
             .find({ ownerId: String(ownerId) })
@@ -674,12 +686,9 @@ app.get("/owner/equipments", requireInternalKey, async (req, res) => {
     }
 });
 
-app.get("/customer/stats", requireInternalKey, async (req, res) => {
+app.get("/customer/stats", verifyToken, verifyRenter, async (req, res) => {
     try {
-        const { userId } = req.query;
-        if (!userId) {
-            return res.status(400).json({ message: "userId is required" });
-        }
+        const userId = req.user.id;
 
         const today = new Date().toISOString().split("T")[0];
 
