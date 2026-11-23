@@ -98,6 +98,8 @@ const bookings = database.collection("bookings");
 await bookings.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true });
 const favorites = database.collection("favorites");
 await favorites.createIndex({ userId: 1, equipmentId: 1 }, { unique: true });
+const payments = database.collection("payments");
+await payments.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true });
 
 const requireInternalKey = (req, res, next) => {
     if (req.headers["x-internal-key"] !== process.env.INTERNAL_API_KEY) {
@@ -112,7 +114,7 @@ app.get("/", (req, res) => {
 
 const JWKS = createRemoteJWKSet(new URL(`${process.env.AUTH_URL}/api/auth/jwks`));
 
-const verifyJwt = async (req, res, next) => {
+const verifyToken = async (req, res, next) => {
     try {
         const header = req.headers.authorization || "";
         const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -136,12 +138,17 @@ const verifyJwt = async (req, res, next) => {
     }
 };
 
-const requireRole = (...roles) => (req, res, next) => {
+const verifyRole = (...roles) => (req, res, next) => {
     if (!roles.includes(req.user?.role)) {
         return res.status(403).json({ message: "Forbidden" });
     }
     next();
 };
+
+const verifyRenter = verifyRole("customer");
+const verifyOwner = verifyRole("owner");
+const verifyAdmin = verifyRole("admin");
+const verifyOwnerOrAdmin = verifyRole("owner", "admin");
 
 const getBookedQuantity = async (equipmentId, startDate, endDate) => {
     const result = await bookings
@@ -160,66 +167,80 @@ const getBookedQuantity = async (equipmentId, startDate, endDate) => {
     return result[0]?.total ?? 0;
 };
 
+const lastMonths = (n = 6) => {
+    const out = [];
+    const now = new Date();
+    for (let i = n - 1; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+    }
+    return out;
+};
+
+const fillMonths = (rows, fields) =>
+    lastMonths(6).map((month) => {
+        const found = rows.find((r) => r._id === month);
+        return {
+            month,
+            ...Object.fromEntries(fields.map((k) => [k, found?.[k] ?? 0])),
+        };
+    });
+
 app.get("/equipments", async (req, res) => {
     try {
-        const query = {};
-
+        const query = { status: "Approved" };
 
         if (req.query.search) {
-            const escaped = req.query.search.replace(
-                /[.*+?^${}()|[\]\\]/g,
-                "\\$&"
-            );
-
+            const escaped = String(req.query.search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             query.$or = [
                 { name: { $regex: escaped, $options: "i" } },
+                { category: { $regex: escaped, $options: "i" } },
                 { location: { $regex: escaped, $options: "i" } },
             ];
         }
 
-
-        if (req.query.category) {
-            query.category = req.query.category;
-        }
-
-        query.status = "Approved";
-
-        if (req.query.rentalType) {
-            query.rentalType = req.query.rentalType;
-        }
-
-        if (req.query.maxPrice) {
-            query.rentalPrice = {
-                $lte: Number(req.query.maxPrice)
-            };
-        }
-
-        if (req.query.inStock === "true") {
-            query.status = "Approved";
-        }
-
+        if (req.query.category) query.category = String(req.query.category);
+        if (req.query.rentalType) query.rentalType = String(req.query.rentalType);
+        if (req.query.maxPrice) query.rentalPrice = { $lte: Number(req.query.maxPrice) };
 
         let sortOption = { createdAt: -1 };
+        if (req.query.sort === "price-asc") sortOption = { rentalPrice: 1 };
+        else if (req.query.sort === "price-desc") sortOption = { rentalPrice: -1 };
 
-        if (req.query.sort === "price-asc") {
-            sortOption = { rentalPrice: 1 };
-        } else if (req.query.sort === "price-desc") {
-            sortOption = { rentalPrice: -1 };
+        let result = await equipments.find(query).sort(sortOption).toArray();
+
+        const availability = req.query.availability;
+        if (availability === "available" || availability === "unavailable") {
+            const dateOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
+            const todayStr = new Date().toISOString().split("T")[0];
+            const start = dateOk(req.query.startDate) ? req.query.startDate : todayStr;
+            const end = dateOk(req.query.endDate) ? req.query.endDate : start;
+
+            const bookedAgg = await bookings
+                .aggregate([
+                    {
+                        $match: {
+                            status: { $ne: "Cancelled" },
+                            startDate: { $lte: end },
+                            endDate: { $gte: start },
+                        },
+                    },
+                    { $group: { _id: "$equipmentId", total: { $sum: "$quantity" } } },
+                ])
+                .toArray();
+
+            const bookedMap = new Map(bookedAgg.map((b) => [b._id, b.total]));
+
+            result = result.filter((e) => {
+                const free = Number(e.quantity) - (bookedMap.get(String(e._id)) ?? 0);
+                return availability === "available" ? free > 0 : free <= 0;
+            });
         }
 
-        const result = await equipments
-            .find(query)
-            .sort(sortOption)
-            .toArray();
-
         res.json(result);
-
     } catch (error) {
         console.error("Fetch equipments error:", error);
-
-        res.status(500).json({
-            message: "Failed to fetch equipments"
-        });
+        res.status(500).json({ message: "Failed to fetch equipments" });
     }
 });
 
@@ -258,7 +279,7 @@ app.get("/equipments/:id/availability", async (req, res) => {
 
 
 
-app.post("/equipments", verifyJwt, requireRole("owner"), async (req, res) => {
+app.post("/equipments", verifyToken, verifyOwner, async (req, res) => {
     try {
         const b = req.body;
 
@@ -299,7 +320,7 @@ app.post("/equipments", verifyJwt, requireRole("owner"), async (req, res) => {
 });
 
 
-app.delete("/equipments/:id", verifyJwt, requireRole("owner", "admin"), async (req, res) => {
+app.delete("/equipments/:id", verifyToken, verifyOwnerOrAdmin, async (req, res) => {
     try {
         const filter = { _id: new ObjectId(req.params.id) };
         if (req.user.role === "owner") filter.ownerId = req.user.id;
@@ -315,7 +336,7 @@ app.delete("/equipments/:id", verifyJwt, requireRole("owner", "admin"), async (r
     }
 });
 
-app.patch("/equipments/:id", verifyJwt, requireRole("owner"), async (req, res) => {
+app.patch("/equipments/:id", verifyToken, verifyOwner, async (req, res) => {
     try {
         const { updates } = req.body;
         if (!updates) {
@@ -356,11 +377,10 @@ app.patch("/equipments/:id", verifyJwt, requireRole("owner"), async (req, res) =
     }
 });
 
-app.get("/bookings", verifyJwt, async (req, res) => {
+app.get("/bookings", verifyToken, async (req, res) => {
     try {
         const query = {};
 
-        // token theke nijer data-i shudhu, query theke na
         if (req.user.role === "customer") query.userId = req.user.id;
         else if (req.user.role === "owner") query.ownerId = req.user.id;
         else if (req.user.role !== "admin") {
@@ -432,6 +452,25 @@ app.post('/bookings', requireInternalKey, async (req, res) => {
         booking.ownerId = equipment.ownerId ?? null;
 
         const result = await bookings.insertOne(booking);
+        if (booking.stripeSessionId) {
+            await payments.updateOne(
+                { stripeSessionId: booking.stripeSessionId },
+                {
+                    $setOnInsert: {
+                        bookingId: result.insertedId,
+                        stripeSessionId: booking.stripeSessionId,
+                        amount: booking.totalAmount,
+                        currency: "usd",
+                        status: "Paid",
+                        userId: booking.userId,
+                        ownerId: booking.ownerId,
+                        equipmentId: booking.equipmentId,
+                        paidAt: new Date().toISOString(),
+                    },
+                },
+                { upsert: true }
+            );
+        }
         res.json(result);
     } catch (error) {
         console.error("Create booking error:", error);
@@ -474,7 +513,7 @@ app.post("/favorites/toggle", requireInternalKey, async (req, res) => {
 });
 
 // admin
-app.get("/admin/users", verifyJwt, requireRole("admin"), async (req, res) => {
+app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const result = await users
             .find({}, { projection: { name: 1, email: 1, role: 1, image: 1, createdAt: 1 } })
@@ -488,7 +527,7 @@ app.get("/admin/users", verifyJwt, requireRole("admin"), async (req, res) => {
 });
 
 
-app.get("/admin/stats", verifyJwt, requireRole("admin"), async (req, res) => {
+app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const today = new Date().toISOString().split("T")[0];
 
@@ -499,25 +538,52 @@ app.get("/admin/stats", verifyJwt, requireRole("admin"), async (req, res) => {
             pendingApprovals,
             completedRentals,
             revenue,
+            bookingRows,
+            revenueRows,
         ] = await Promise.all([
             users.countDocuments(),
             equipments.countDocuments(),
             bookings.countDocuments(),
             equipments.countDocuments({ status: "Pending" }),
-            // Completed status, ba Confirmed kintu end date periye geche
             bookings.countDocuments({
                 $or: [
                     { status: "Completed" },
                     { status: "Confirmed", endDate: { $lt: today } },
                 ],
             }),
+            payments
+                .aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }])
+                .toArray(),
             bookings
                 .aggregate([
-                    { $match: { paymentStatus: "Paid" } },
-                    { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+                    { $match: { bookedAt: { $type: "string" } } },
+                    {
+                        $group: {
+                            _id: { $substrBytes: ["$bookedAt", 0, 7] },
+                            bookings: { $sum: 1 },
+                        },
+                    },
+                ])
+                .toArray(),
+            payments
+                .aggregate([
+                    { $match: { paidAt: { $type: "string" } } },
+                    {
+                        $group: {
+                            _id: { $substrBytes: ["$paidAt", 0, 7] },
+                            revenue: { $sum: "$amount" },
+                        },
+                    },
                 ])
                 .toArray(),
         ]);
+
+        const monthlyBookings = fillMonths(bookingRows, ["bookings"]);
+        const monthlyRevenue = fillMonths(revenueRows, ["revenue"]);
+        const monthly = monthlyBookings.map((m, i) => ({
+            ...m,
+            revenue: monthlyRevenue[i].revenue,
+        }));
 
         res.json({
             totalUsers,
@@ -526,6 +592,7 @@ app.get("/admin/stats", verifyJwt, requireRole("admin"), async (req, res) => {
             pendingApprovals,
             completedRentals,
             totalRevenue: revenue[0]?.total ?? 0,
+            monthly,
         });
     } catch (error) {
         console.error("Fetch stats error:", error);
@@ -666,7 +733,7 @@ app.get("/customer/stats", requireInternalKey, async (req, res) => {
     }
 });
 
-app.patch("/admin/users/:id/role", verifyJwt, requireRole("admin"), async (req, res) => {
+app.patch("/admin/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const { role } = req.body;
         if (!["customer", "owner", "admin"].includes(role)) {
@@ -687,7 +754,8 @@ app.patch("/admin/users/:id/role", verifyJwt, requireRole("admin"), async (req, 
 });
 
 
-app.get("/admin/bookings", verifyJwt, requireRole("admin"), async (req, res) => {
+
+app.get("/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const result = await bookings.find({}).sort({ bookedAt: -1 }).toArray();
         res.json(result);
@@ -697,7 +765,7 @@ app.get("/admin/bookings", verifyJwt, requireRole("admin"), async (req, res) => 
     }
 });
 
-app.get("/admin/equipments", verifyJwt, requireRole("admin"), async (req, res) => {
+app.get("/admin/equipments", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const result = await equipments.find({}).sort({ createdAt: -1 }).toArray();
         res.json(result);
@@ -707,7 +775,7 @@ app.get("/admin/equipments", verifyJwt, requireRole("admin"), async (req, res) =
     }
 });
 
-app.patch("/equipments/:id/status", verifyJwt, requireRole("admin"), async (req, res) => {
+app.patch("/equipments/:id/status", verifyToken, verifyAdmin, async (req, res) => {
     try {
         const { status } = req.body;
         if (!["Approved", "Pending"].includes(status)) {
